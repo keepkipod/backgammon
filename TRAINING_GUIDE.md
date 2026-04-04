@@ -87,7 +87,7 @@ git push origin main
 
 ### 2.2 — Create the Colab Notebook
 
-Go to [Google Colab](https://colab.research.google.com/) and create a new notebook. Add these cells:
+Go to [Google Colab](https://colab.research.google.com/) and create a new notebook. **Paste and run each cell one at a time, in order** — each cell depends on the previous one completing before you proceed.
 
 **Cell 1 — Setup & Clone Repo:**
 
