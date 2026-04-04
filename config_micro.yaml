@@ -1,0 +1,29 @@
+# Micro training config — local validation only (~10 minutes on M3 Mac)
+# Purpose: verify loss decreases before committing cloud GPU time
+
+hidden_size: 128
+num_res_blocks: 5
+
+num_simulations: 25
+c_puct: 1.5
+dirichlet_alpha: 0.3
+dirichlet_epsilon: 0.25
+temperature_moves: 15
+
+num_self_play_games: 10
+max_game_length: 1000
+
+batch_size: 32
+learning_rate: 0.001
+weight_decay: 0.0001
+num_training_steps: 50
+replay_buffer_size: 10000
+
+num_eval_games: 10
+win_rate_threshold: 0.55
+
+checkpoint_dir: checkpoints_micro
+checkpoint_interval: 25
+
+max_policy_entropy_drop: 0.5
+eval_vs_random_interval: 50
