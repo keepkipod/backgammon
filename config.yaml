@@ -1,0 +1,36 @@
+# Training configuration
+# Adjust these based on available compute
+
+# Network architecture
+hidden_size: 128
+num_res_blocks: 5
+
+# MCTS
+num_simulations: 200
+c_puct: 1.5
+dirichlet_alpha: 0.3
+dirichlet_epsilon: 0.25
+temperature_moves: 30
+
+# Self-play
+num_self_play_games: 100
+max_game_length: 500
+
+# Training
+batch_size: 256
+learning_rate: 0.001
+weight_decay: 0.0001
+num_training_steps: 1000
+replay_buffer_size: 100000
+
+# Evaluation
+num_eval_games: 40
+win_rate_threshold: 0.55
+
+# Checkpointing
+checkpoint_dir: checkpoints
+checkpoint_interval: 100
+
+# Health checks
+max_policy_entropy_drop: 0.5
+eval_vs_random_interval: 200
