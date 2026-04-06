@@ -98,7 +98,7 @@ canvas { border-radius: 8px; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,
 
     <div class="card">
       <div class="btn-row">
-        <button class="btn btn-secondary" id="btn-roll" onclick="rollDice()" disabled>Roll Dice</button>
+        <button class="btn btn-primary" id="btn-roll" onclick="rollDice()" disabled>Roll Dice</button>
         <button class="btn btn-secondary" id="btn-ai" onclick="aiMove()" disabled>AI Turn</button>
       </div>
     </div>
@@ -153,13 +153,25 @@ const BOARD_W = 840, BOARD_H = 500;
 const MARGIN = 30;
 const BAR_W = 40;
 const TRAY_W = 36;  // borne-off tray width
-const POINT_W = (BOARD_W - 2 * MARGIN - BAR_W - TRAY_W - 10) / 12;
+const FELT_LEFT = MARGIN - 5;                          // 25
+const BAR_LEFT = BOARD_W / 2 - BAR_W / 2;              // 400
+const BAR_RIGHT = BOARD_W / 2 + BAR_W / 2;             // 440
+const TRAY_LEFT = BOARD_W - MARGIN / 2 - TRAY_W;       // 789
+const POINT_W_LEFT = (BAR_LEFT - FELT_LEFT) / 6;       // 62.5
+const POINT_W_RIGHT = (TRAY_LEFT - BAR_RIGHT) / 6;     // 58.17
+const POINT_W = Math.min(POINT_W_LEFT, POINT_W_RIGHT); // for checker sizing
 const POINT_H = 200;
 const CHECKER_R = POINT_W / 2 - 2;
 const BAR_IDX = 24;
 
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
+
+// Load board SVG as background image
+const boardImg = new Image();
+boardImg.src = '/static/board.svg?v=' + Date.now();
+let boardImgReady = false;
+boardImg.onload = () => { boardImgReady = true; drawBoard(); };
 
 // Colors
 const BOARD_BG = '#2d572c';
@@ -178,16 +190,24 @@ const AI_TRACE_COLOR = 'rgba(255, 165, 0, 0.85)';        // orange — AI move t
 
 function pointX(pointIdx) {
   // Board layout: points 12-23 on top (left to right), 11-0 on bottom (left to right)
-  // With bar in the middle
   let col;
   if (pointIdx >= 12) {
     col = pointIdx - 12; // 0-11, left to right on top
   } else {
     col = 11 - pointIdx; // 0-11, left to right on bottom
   }
-  let x = MARGIN + col * POINT_W + POINT_W / 2;
-  if (col >= 6) x += BAR_W; // right side of bar
-  return x;
+  if (col < 6) {
+    // Left half: triangles from FELT_LEFT (25) to BAR_LEFT (400)
+    return FELT_LEFT + col * POINT_W_LEFT + POINT_W_LEFT / 2;
+  } else {
+    // Right half: triangles from BAR_RIGHT (440) to TRAY_LEFT (789)
+    return BAR_RIGHT + (col - 6) * POINT_W_RIGHT + POINT_W_RIGHT / 2;
+  }
+}
+
+function pointWidth(pointIdx) {
+  let col = pointIdx >= 12 ? pointIdx - 12 : 11 - pointIdx;
+  return col < 6 ? POINT_W_LEFT : POINT_W_RIGHT;
 }
 
 function pointY(pointIdx, checkerIdx) {
@@ -229,59 +249,43 @@ function borneOffY(player, idx) {
 const TRAY_CLICK_ID = 25;  // special ID for borne-off tray click
 
 function drawBoard() {
-  // Background
-  ctx.fillStyle = BOARD_BORDER;
-  ctx.fillRect(0, 0, BOARD_W, BOARD_H);
-  ctx.fillStyle = BOARD_BG;
-  ctx.fillRect(MARGIN - 5, MARGIN - 5, BOARD_W - 2 * MARGIN + 10, BOARD_H - 2 * MARGIN + 10);
+  if (boardImgReady) {
+    // SVG provides frame, felt, bar, trays
+    ctx.drawImage(boardImg, 0, 0, BOARD_W, BOARD_H);
+  } else {
+    // Fallback while SVG loads
+    ctx.fillStyle = BOARD_BORDER;
+    ctx.fillRect(0, 0, BOARD_W, BOARD_H);
+    ctx.fillStyle = BOARD_BG;
+    ctx.fillRect(MARGIN - 5, MARGIN - 5, BOARD_W - 2 * MARGIN + 10, BOARD_H - 2 * MARGIN + 10);
+    ctx.fillStyle = BOARD_BORDER;
+    ctx.fillRect(BOARD_W / 2 - BAR_W / 2, MARGIN - 5, BAR_W, BOARD_H - 2 * MARGIN + 10);
+  }
 
-  // Bar
-  ctx.fillStyle = BOARD_BORDER;
-  ctx.fillRect(BOARD_W / 2 - BAR_W / 2, MARGIN - 5, BAR_W, BOARD_H - 2 * MARGIN + 10);
-
-  // Points (triangles)
+  // Draw triangles on canvas
   for (let i = 0; i < 24; i++) {
     const x = pointX(i);
+    const pw = pointWidth(i);
     const isTop = i >= 12;
     const color = i % 2 === 0 ? POINT_LIGHT : POINT_DARK;
-
     ctx.fillStyle = color;
     ctx.beginPath();
     if (isTop) {
-      ctx.moveTo(x - POINT_W / 2, MARGIN - 5);
-      ctx.lineTo(x + POINT_W / 2, MARGIN - 5);
+      ctx.moveTo(x - pw / 2, MARGIN - 5);
+      ctx.lineTo(x + pw / 2, MARGIN - 5);
       ctx.lineTo(x, MARGIN + POINT_H);
     } else {
-      ctx.moveTo(x - POINT_W / 2, BOARD_H - MARGIN + 5);
-      ctx.lineTo(x + POINT_W / 2, BOARD_H - MARGIN + 5);
+      ctx.moveTo(x - pw / 2, BOARD_H - MARGIN + 5);
+      ctx.lineTo(x + pw / 2, BOARD_H - MARGIN + 5);
       ctx.lineTo(x, BOARD_H - MARGIN - POINT_H);
     }
     ctx.fill();
   }
 
-  // Borne-off trays
-  const trayX = BOARD_W - MARGIN / 2 - TRAY_W;
-  const trayH = (BOARD_H - 2 * MARGIN + 10) / 2 - 5;
-  // Player 1 (AI / Brown) — top
-  ctx.fillStyle = '#1e3d1e';
-  ctx.strokeStyle = '#5c3a1e';
-  ctx.lineWidth = 2;
-  ctx.fillRect(trayX, MARGIN - 5, TRAY_W, trayH);
-  ctx.strokeRect(trayX, MARGIN - 5, TRAY_W, trayH);
-  // Player 0 (You / White) — bottom
-  ctx.fillRect(trayX, BOARD_H / 2 + 5, TRAY_W, trayH);
-  ctx.strokeRect(trayX, BOARD_H / 2 + 5, TRAY_W, trayH);
-  // Labels
-  ctx.font = '9px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#888';
-  ctx.fillText('OFF', trayX + TRAY_W / 2, MARGIN - 8);
-  ctx.fillText('OFF', trayX + TRAY_W / 2, BOARD_H - MARGIN + 16);
-
   // Point numbers
   ctx.font = '10px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#888';
+  ctx.fillStyle = '#a89060';
   for (let i = 0; i < 24; i++) {
     const x = pointX(i);
     if (i >= 12) {
@@ -290,6 +294,13 @@ function drawBoard() {
       ctx.fillText(i + 1, x, BOARD_H - MARGIN + 18);
     }
   }
+
+  // OFF labels
+  const trayX = BOARD_W - MARGIN / 2 - TRAY_W;
+  ctx.font = '9px sans-serif';
+  ctx.fillStyle = '#a89060';
+  ctx.fillText('OFF', trayX + TRAY_W / 2, MARGIN - 8);
+  ctx.fillText('OFF', trayX + TRAY_W / 2, BOARD_H - MARGIN + 16);
 }
 
 function drawChecker(x, y, player, count) {
@@ -313,16 +324,17 @@ function drawChecker(x, y, player, count) {
 
 function drawPointHighlight(pointIdx, color) {
   const x = pointX(pointIdx);
+  const pw = pointWidth(pointIdx);
   const isTop = pointIdx >= 12;
   ctx.fillStyle = color;
   ctx.beginPath();
   if (isTop) {
-    ctx.moveTo(x - POINT_W / 2, MARGIN - 5);
-    ctx.lineTo(x + POINT_W / 2, MARGIN - 5);
+    ctx.moveTo(x - pw / 2, MARGIN - 5);
+    ctx.lineTo(x + pw / 2, MARGIN - 5);
     ctx.lineTo(x, MARGIN + POINT_H);
   } else {
-    ctx.moveTo(x - POINT_W / 2, BOARD_H - MARGIN + 5);
-    ctx.lineTo(x + POINT_W / 2, BOARD_H - MARGIN + 5);
+    ctx.moveTo(x - pw / 2, BOARD_H - MARGIN + 5);
+    ctx.lineTo(x + pw / 2, BOARD_H - MARGIN + 5);
     ctx.lineTo(x, BOARD_H - MARGIN - POINT_H);
   }
   ctx.fill();
@@ -556,7 +568,7 @@ function getClickedPoint(mx, my) {
   for (let i = 0; i < 24; i++) {
     const x = pointX(i);
     const isTop = i >= 12;
-    if (Math.abs(mx - x) < POINT_W / 2) {
+    if (Math.abs(mx - x) < pointWidth(i) / 2) {
       if (isTop && my < BOARD_H / 2) return i;
       if (!isTop && my > BOARD_H / 2) return i;
     }

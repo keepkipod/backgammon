@@ -54,6 +54,7 @@ class NumpyJSONProvider(DefaultJSONProvider):
 app = Flask(__name__, static_folder="static")
 app.json_provider_class = NumpyJSONProvider
 app.json = NumpyJSONProvider(app)
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # disable static file caching
 
 # Global game state
 game = BackgammonGame()
