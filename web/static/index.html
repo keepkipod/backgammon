@@ -62,6 +62,16 @@ canvas { border-radius: 8px; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,
 .toggle-row { display: flex; align-items: center; gap: 8px; font-size: 0.85em; margin-top: 6px; }
 .toggle-row input[type=checkbox] { accent-color: #c4a35a; width: 16px; height: 16px; }
 
+/* Color picker */
+.color-picker { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 0.85em; }
+.color-option { display: flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 12px; cursor: pointer; border: 2px solid transparent; transition: all 0.2s; }
+.color-picker.locked .color-option { cursor: default; opacity: 0.4; pointer-events: none; }
+.color-option:hover { border-color: #555; }
+.color-option.selected { border-color: #c4a35a; }
+.color-swatch { width: 16px; height: 16px; border-radius: 50%; }
+.color-swatch.white { background: #f0e6d3; }
+.color-swatch.brown { background: #4a3728; border: 1px solid #888; }
+
 /* Game info */
 .game-info { display: flex; justify-content: space-between; font-size: 0.85em; }
 .player-info { display: flex; align-items: center; gap: 6px; }
@@ -82,13 +92,22 @@ canvas { border-radius: 8px; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,
   <div class="panel">
     <div class="card">
       <div class="game-info">
-        <div class="player-info"><div class="player-dot p0"></div> You (White)</div>
-        <div class="player-info"><div class="player-dot p1"></div> AI (Brown)</div>
+        <div class="player-info" id="player-you"><div class="player-dot p0"></div> <span id="you-label">You (White)</span></div>
+        <div class="player-info" id="player-ai"><div class="player-dot p1"></div> <span id="ai-label">AI (Brown)</span></div>
+      </div>
+      <div class="color-picker">
+        <span>Play as:</span>
+        <div class="color-option selected" id="opt-white" onclick="setPlayerColor(0)">
+          <div class="color-swatch white"></div> White
+        </div>
+        <div class="color-option" id="opt-brown" onclick="setPlayerColor(1)">
+          <div class="color-swatch brown"></div> Brown
+        </div>
       </div>
     </div>
 
     <div class="card">
-      <div class="status" id="status">Click "New Game" to start</div>
+      <div class="status" id="status">Choose color and click "New Game"</div>
     </div>
 
     <div class="card">
@@ -144,10 +163,13 @@ canvas { border-radius: 8px; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,
 // ─── Game State ─────────────────────────────────────────────────────
 let gameState = null;
 let selectedSource = null;
+let compoundMoves = [];   // [{dest, actions: [{source, die}, ...], is_compound}]
 let hoveredPoint = null;
 let aiMoveTrace = [];     // [{source, dest, die}, ...] — AI's last turn moves
 let aiLastDice = null;    // dice the AI rolled, shown until player rolls
 let showHints = true;     // toggle for best-move hint
+let humanPlayer = 0;      // 0=white, 1=brown
+let chosenColor = 0;      // color selected before starting game
 
 const BOARD_W = 840, BOARD_H = 500;
 const MARGIN = 30;
@@ -184,34 +206,41 @@ const SOURCE_HIGHLIGHT = 'rgba(0, 160, 255, 0.45)';      // blue — legal sourc
 const DEST_HIGHLIGHT = 'rgba(0, 220, 100, 0.45)';        // green — destinations
 const BLUNDER_HIGHLIGHT = 'rgba(255, 50, 80, 0.55)';     // red — blunder warning
 const HINT_HIGHLIGHT = 'rgba(255, 215, 0, 0.5)';         // gold — best move hint
+const COMPOUND_HIGHLIGHT = 'rgba(0, 180, 220, 0.45)';     // cyan — compound (multi-die) destination
 const AI_TRACE_COLOR = 'rgba(255, 165, 0, 0.85)';        // orange — AI move trace
 
 // ─── Drawing ────────────────────────────────────────────────────────
 
+// Map logical point index to visual index so human's home is always bottom-right
+function viewPoint(i) {
+  return humanPlayer === 0 ? i : 23 - i;
+}
+
 function pointX(pointIdx) {
-  // Board layout: points 12-23 on top (left to right), 11-0 on bottom (left to right)
+  // Board layout: visual points 12-23 on top (left to right), 11-0 on bottom (left to right)
+  const vi = viewPoint(pointIdx);
   let col;
-  if (pointIdx >= 12) {
-    col = pointIdx - 12; // 0-11, left to right on top
+  if (vi >= 12) {
+    col = vi - 12; // 0-11, left to right on top
   } else {
-    col = 11 - pointIdx; // 0-11, left to right on bottom
+    col = 11 - vi; // 0-11, left to right on bottom
   }
   if (col < 6) {
-    // Left half: triangles from FELT_LEFT (25) to BAR_LEFT (400)
     return FELT_LEFT + col * POINT_W_LEFT + POINT_W_LEFT / 2;
   } else {
-    // Right half: triangles from BAR_RIGHT (440) to TRAY_LEFT (789)
     return BAR_RIGHT + (col - 6) * POINT_W_RIGHT + POINT_W_RIGHT / 2;
   }
 }
 
 function pointWidth(pointIdx) {
-  let col = pointIdx >= 12 ? pointIdx - 12 : 11 - pointIdx;
+  const vi = viewPoint(pointIdx);
+  let col = vi >= 12 ? vi - 12 : 11 - vi;
   return col < 6 ? POINT_W_LEFT : POINT_W_RIGHT;
 }
 
 function pointY(pointIdx, checkerIdx) {
-  const isTop = pointIdx >= 12;
+  const vi = viewPoint(pointIdx);
+  const isTop = vi >= 12;
   const gap = Math.min(CHECKER_R * 2 + 2, POINT_H / 7);
   if (isTop) {
     return MARGIN + CHECKER_R + checkerIdx * gap;
@@ -222,9 +251,9 @@ function pointY(pointIdx, checkerIdx) {
 
 function barY(player, checkerIdx) {
   const gap = CHECKER_R * 2 + 2;
-  if (player === 1) { // top half
+  if (player !== humanPlayer) { // AI's bar at top
     return MARGIN + CHECKER_R + checkerIdx * gap;
-  } else { // bottom half
+  } else { // Human's bar at bottom
     return BOARD_H - MARGIN - CHECKER_R - checkerIdx * gap;
   }
 }
@@ -239,9 +268,9 @@ function borneOffX() {
 
 function borneOffY(player, idx) {
   const gap = 8;
-  if (player === 1) {
+  if (player !== humanPlayer) { // AI's borne-off at top
     return MARGIN + 10 + idx * gap;
-  } else {
+  } else { // Human's borne-off at bottom
     return BOARD_H - MARGIN - 10 - idx * gap;
   }
 }
@@ -266,7 +295,8 @@ function drawBoard() {
   for (let i = 0; i < 24; i++) {
     const x = pointX(i);
     const pw = pointWidth(i);
-    const isTop = i >= 12;
+    const vi = viewPoint(i);
+    const isTop = vi >= 12;
     const color = i % 2 === 0 ? POINT_LIGHT : POINT_DARK;
     ctx.fillStyle = color;
     ctx.beginPath();
@@ -288,7 +318,8 @@ function drawBoard() {
   ctx.fillStyle = '#a89060';
   for (let i = 0; i < 24; i++) {
     const x = pointX(i);
-    if (i >= 12) {
+    const vi = viewPoint(i);
+    if (vi >= 12) {
       ctx.fillText(i + 1, x, MARGIN - 10);
     } else {
       ctx.fillText(i + 1, x, BOARD_H - MARGIN + 18);
@@ -325,7 +356,7 @@ function drawChecker(x, y, player, count) {
 function drawPointHighlight(pointIdx, color) {
   const x = pointX(pointIdx);
   const pw = pointWidth(pointIdx);
-  const isTop = pointIdx >= 12;
+  const isTop = viewPoint(pointIdx) >= 12;
   ctx.fillStyle = color;
   ctx.beginPath();
   if (isTop) {
@@ -353,7 +384,7 @@ function drawState() {
   const BLUNDER_THRESHOLD = 0.05; // 5% equity drop
 
   // Highlight legal source points (blue), with best move hint (gold)
-  if (selectedSource === null && s.current_player === 0) {
+  if (selectedSource === null && s.current_player === humanPlayer) {
     const sources = new Set(legal.map(a => a.source));
     sources.forEach(src => {
       if (src < 24) drawPointHighlight(src, SOURCE_HIGHLIGHT);
@@ -374,48 +405,42 @@ function drawState() {
     }
   }
 
-  // Highlight destinations for selected source
+  // Highlight destinations for selected source (using compound moves data)
   if (selectedSource !== null) {
-    // Highlight the selected source (blue, dimmer)
+    // Highlight the selected source (blue)
     if (selectedSource < 24) drawPointHighlight(selectedSource, SOURCE_HIGHLIGHT);
     else {
       ctx.fillStyle = SOURCE_HIGHLIGHT;
       ctx.fillRect(BOARD_W / 2 - BAR_W / 2, BOARD_H / 2 - 40, BAR_W, 80);
     }
-    // Show destination highlights (green for good, red for blunder)
+    // Show destination highlights from compound moves
     let hasBearOff = false;
     let bearOffIsBlunder = false;
-    legal.filter(a => a.source === selectedSource).forEach(a => {
-      let dest;
-      if (selectedSource === BAR_IDX) {
-        dest = s.current_player === 0 ? 24 - a.die : a.die - 1;
-      } else {
-        dest = s.current_player === 0 ? selectedSource - a.die : selectedSource + a.die;
-      }
-
-      // Check if this move is a blunder compared to the best move
+    for (const cm of compoundMoves) {
+      // Blunder check (only for single-die moves that appear in analysis)
       let isBlunder = false;
-      if (bestMove && s.analysis && s.analysis.top_moves) {
+      if (!cm.is_compound && bestMove && s.analysis && s.analysis.top_moves) {
+        const a = cm.actions[0];
         const thisMove = s.analysis.top_moves.find(m => m.source === a.source && m.die === a.die);
         if (thisMove && bestMove.equity - thisMove.equity > BLUNDER_THRESHOLD) {
           isBlunder = true;
         }
       }
 
-      const color = isBlunder ? BLUNDER_HIGHLIGHT : DEST_HIGHLIGHT;
-      if (dest >= 0 && dest < 24) {
-        drawPointHighlight(dest, color);
-      } else {
+      const color = isBlunder ? BLUNDER_HIGHLIGHT : (cm.is_compound ? COMPOUND_HIGHLIGHT : DEST_HIGHLIGHT);
+      if (cm.dest >= 0 && cm.dest < 24) {
+        drawPointHighlight(cm.dest, color);
+      } else if (cm.dest === -1) {
         hasBearOff = true;
         if (isBlunder) bearOffIsBlunder = true;
       }
-    });
+    }
     // Highlight borne-off tray if bearing off is possible
     if (hasBearOff) {
       const trayX = BOARD_W - MARGIN / 2 - TRAY_W;
       const trayH = (BOARD_H - 2 * MARGIN + 10) / 2 - 5;
       ctx.fillStyle = bearOffIsBlunder ? BLUNDER_HIGHLIGHT : DEST_HIGHLIGHT;
-      if (s.current_player === 0) {
+      if (s.current_player === humanPlayer) {
         ctx.fillRect(trayX, BOARD_H / 2 + 5, TRAY_W, trayH);
       } else {
         ctx.fillRect(trayX, MARGIN - 5, TRAY_W, trayH);
@@ -469,7 +494,7 @@ function drawState() {
       ctx.fillStyle = '#c4a35a';
       ctx.font = 'bold 11px sans-serif';
       ctx.textAlign = 'center';
-      const labelY = player === 1 ? MARGIN + 10 + s.borne_off[player] * 8 + 14 : BOARD_H - MARGIN - 10 - s.borne_off[player] * 8 - 8;
+      const labelY = player !== humanPlayer ? MARGIN + 10 + s.borne_off[player] * 8 + 14 : BOARD_H - MARGIN - 10 - s.borne_off[player] * 8 - 8;
       ctx.fillText(s.borne_off[player] + '/15', bx, labelY);
     }
   }
@@ -494,18 +519,20 @@ function drawAiTrace() {
       sy = BOARD_H / 2 + yOffset;
     } else {
       sx = pointX(move.source);
-      sy = (move.source >= 12 ? MARGIN + POINT_H / 2 : BOARD_H - MARGIN - POINT_H / 2) + yOffset;
+      const vsrc = viewPoint(move.source);
+      sy = (vsrc >= 12 ? MARGIN + POINT_H / 2 : BOARD_H - MARGIN - POINT_H / 2) + yOffset;
     }
 
     // Destination position
     let dx, dy;
     if (move.dest < 0 || move.dest >= 24) {
-      // Bearing off
+      // Bearing off — AI's tray is at top
       dx = borneOffX();
-      dy = MARGIN + POINT_H / 2 + yOffset; // AI is top
+      dy = (MARGIN + POINT_H / 2) + yOffset;
     } else {
       dx = pointX(move.dest);
-      dy = (move.dest >= 12 ? MARGIN + POINT_H / 2 : BOARD_H - MARGIN - POINT_H / 2) + yOffset;
+      const vdest = viewPoint(move.dest);
+      dy = (vdest >= 12 ? MARGIN + POINT_H / 2 : BOARD_H - MARGIN - POINT_H / 2) + yOffset;
     }
 
     // Draw arrow line
@@ -567,7 +594,7 @@ function getClickedPoint(mx, my) {
   // Check points
   for (let i = 0; i < 24; i++) {
     const x = pointX(i);
-    const isTop = i >= 12;
+    const isTop = viewPoint(i) >= 12;
     if (Math.abs(mx - x) < pointWidth(i) / 2) {
       if (isTop && my < BOARD_H / 2) return i;
       if (!isTop && my > BOARD_H / 2) return i;
@@ -576,8 +603,8 @@ function getClickedPoint(mx, my) {
   return null;
 }
 
-canvas.addEventListener('click', function(e) {
-  if (!gameState || gameState.game_over || gameState.current_player !== 0) return;
+canvas.addEventListener('click', async function(e) {
+  if (!gameState || gameState.game_over || gameState.current_player !== humanPlayer) return;
   if (gameState.needs_dice || !gameState.legal_actions.length) return;
 
   const rect = canvas.getBoundingClientRect();
@@ -587,6 +614,7 @@ canvas.addEventListener('click', function(e) {
 
   if (clicked === null) {
     selectedSource = null;
+    compoundMoves = [];
     drawState();
     return;
   }
@@ -597,6 +625,9 @@ canvas.addEventListener('click', function(e) {
       const hasMove = gameState.legal_actions.some(a => a.source === clicked);
       if (hasMove) {
         selectedSource = clicked;
+        // Fetch compound destinations from server
+        const data = await apiCall('/api/compound-moves', 'POST', { source: clicked });
+        compoundMoves = data.moves || [];
         drawState();
       } else {
         // Check if the player has a checker here but it's not a legal source
@@ -605,8 +636,6 @@ canvas.addEventListener('click', function(e) {
           ((gameState.current_player === 0 && gameState.points[idx] > 0) ||
            (gameState.current_player === 1 && gameState.points[idx] < 0));
         if (hasOwnChecker) {
-          // Check if it's maximization or simply no moves for that checker
-          const allSources = new Set(gameState.legal_actions.map(a => a.source));
           const availableDice = new Set(gameState.legal_actions.map(a => a.die));
           const allDice = new Set(gameState.dice_remaining);
           const blockedDice = [...allDice].filter(d => !availableDice.has(d));
@@ -619,33 +648,18 @@ canvas.addEventListener('click', function(e) {
       }
     }
   } else {
-    // Try to find matching action by destination
-    const actions = gameState.legal_actions.filter(a => a.source === selectedSource);
-    let matched = null;
-
-    for (const a of actions) {
-      let dest;
-      if (selectedSource === BAR_IDX) {
-        dest = gameState.current_player === 0 ? 24 - a.die : a.die - 1;
-      } else {
-        dest = gameState.current_player === 0 ? selectedSource - a.die : selectedSource + a.die;
-      }
-      // Bearing off: dest < 0 or >= 24 — click on borne-off tray
-      if (dest < 0 || dest >= 24) {
-        if (clicked === TRAY_CLICK_ID) {
-          matched = a;
-          break;
-        }
-      } else if (clicked === dest) {
-        matched = a;
-        break;
-      }
-    }
+    // Find matching compound move by destination
+    const destId = clicked === TRAY_CLICK_ID ? -1 : clicked;
+    const matched = compoundMoves.find(m => m.dest === destId);
 
     if (matched) {
-      makeMove(matched.source, matched.die);
+      // Execute action sequence (single or compound)
+      for (const action of matched.actions) {
+        await makeMove(action.source, action.die);
+      }
     }
     selectedSource = null;
+    compoundMoves = [];
     drawState();
   }
 });
@@ -659,13 +673,64 @@ async function apiCall(url, method = 'GET', body = null) {
   return res.json();
 }
 
+function setPlayerColor(color) {
+  if (gameState && !gameState.game_over) return; // locked during a game
+  chosenColor = color;
+  document.getElementById('opt-white').classList.toggle('selected', color === 0);
+  document.getElementById('opt-brown').classList.toggle('selected', color === 1);
+}
+
 async function newGame() {
-  gameState = await apiCall('/api/new-game', 'POST');
+  // Unlock color picker momentarily (will re-lock below)
+  document.querySelector('.color-picker').classList.remove('locked');
+  const data = await apiCall('/api/new-game', 'POST', { color: chosenColor });
+  gameState = data;
+  humanPlayer = data.human_player;
   selectedSource = null;
   aiMoveTrace = [];
   aiLastDice = null;
   hideBlunder();
+
+  // Lock color picker during game
+  document.querySelector('.color-picker').classList.add('locked');
+
+  // Update player labels, dot colors, and position (white side left, brown side right)
+  const gameInfo = document.querySelector('.game-info');
+  const youEl = document.getElementById('player-you');
+  const aiEl = document.getElementById('player-ai');
+  const youDot = youEl.querySelector('.player-dot');
+  const aiDot = aiEl.querySelector('.player-dot');
+  if (humanPlayer === 0) {
+    document.getElementById('you-label').textContent = 'You (White)';
+    document.getElementById('ai-label').textContent = 'AI (Brown)';
+    youDot.className = 'player-dot p0';
+    aiDot.className = 'player-dot p1';
+    // You (White) on left, AI (Brown) on right
+    gameInfo.insertBefore(youEl, aiEl);
+  } else {
+    document.getElementById('you-label').textContent = 'You (Brown)';
+    document.getElementById('ai-label').textContent = 'AI (White)';
+    youDot.className = 'player-dot p1';
+    aiDot.className = 'player-dot p0';
+    // AI (White) on left, You (Brown) on right
+    gameInfo.insertBefore(aiEl, youEl);
+  }
+
+  // Show opening roll in dice area and status
+  const roll = data.opening_roll;
+  if (roll) {
+    const who = roll.first_player === humanPlayer ? 'You go' : 'AI goes';
+    setStatus(`${who} first!`);
+    // Show opening dice with player labels
+    showOpeningRoll(roll);
+  }
+
   updateUI();
+
+  // If AI goes first, trigger AI move after a delay
+  if (gameState && !gameState.game_over && gameState.current_player !== humanPlayer) {
+    setTimeout(aiMove, 1200);
+  }
 }
 
 async function rollDice() {
@@ -684,7 +749,7 @@ async function makeMove(source, die) {
   updateUI();
 
   // Auto-trigger AI turn if it's now AI's turn
-  if (gameState && !gameState.game_over && gameState.current_player === 1 && gameState.needs_dice) {
+  if (gameState && !gameState.game_over && gameState.current_player !== humanPlayer && gameState.needs_dice) {
     setTimeout(aiMove, 500);
   }
 }
@@ -716,6 +781,7 @@ function toggleHints(enabled) {
 
 function updateUI() {
   if (!gameState) return;
+  if (gameState.human_player !== undefined) humanPlayer = gameState.human_player;
 
   drawState();
   updateDice();
@@ -741,7 +807,7 @@ function updateDice() {
   }
 
   // If player needs to roll, show the AI's last dice (dimmed) so they can see what AI rolled
-  if (aiLastDice && s.needs_dice && s.current_player === 0) {
+  if (aiLastDice && s.needs_dice && s.current_player === humanPlayer) {
     aiLastDice.forEach(d => {
       const el = document.createElement('div');
       el.className = 'die used';
@@ -749,6 +815,40 @@ function updateDice() {
       container.appendChild(el);
     });
   }
+}
+
+function showOpeningRoll(roll) {
+  const container = document.getElementById('dice');
+  container.innerHTML = '';
+
+  // Human's die
+  const youLabel = document.createElement('span');
+  youLabel.style.cssText = 'font-size: 0.8em; color: #aaa; margin-right: 2px;';
+  youLabel.textContent = 'You:';
+  container.appendChild(youLabel);
+
+  const youDie = document.createElement('div');
+  youDie.className = 'die';
+  if (roll.human_die < roll.ai_die) youDie.classList.add('used');
+  youDie.textContent = roll.human_die;
+  container.appendChild(youDie);
+
+  // Small spacer
+  const spacer = document.createElement('span');
+  spacer.style.cssText = 'width: 8px;';
+  container.appendChild(spacer);
+
+  // AI's die
+  const aiLabel = document.createElement('span');
+  aiLabel.style.cssText = 'font-size: 0.8em; color: #aaa; margin-right: 2px;';
+  aiLabel.textContent = 'AI:';
+  container.appendChild(aiLabel);
+
+  const aiDie = document.createElement('div');
+  aiDie.className = 'die';
+  if (roll.ai_die < roll.human_die) aiDie.classList.add('used');
+  aiDie.textContent = roll.ai_die;
+  container.appendChild(aiDie);
 }
 
 function updateAnalysis() {
@@ -775,21 +875,22 @@ function updateAnalysis() {
 
 function updateButtons() {
   const s = gameState;
-  document.getElementById('btn-roll').disabled = !s.needs_dice || s.game_over || s.current_player !== 0;
-  document.getElementById('btn-ai').disabled = s.game_over || s.current_player !== 1;
+  document.getElementById('btn-roll').disabled = !s.needs_dice || s.game_over || s.current_player !== humanPlayer;
+  document.getElementById('btn-ai').disabled = s.game_over || s.current_player === humanPlayer;
 }
 
 function updateStatus() {
   const s = gameState;
   let msg = '';
   if (s.game_over) {
-    msg = s.winner === 0 ? 'You win!' : 'AI wins!';
+    msg = s.winner === humanPlayer ? 'You win!' : 'AI wins!';
     const reward = Math.abs(s.borne_off[1 - s.winner] === 0 ? (s.bar[1 - s.winner] > 0 ? 3 : 2) : 1);
     if (reward === 2) msg += ' (Gammon)';
     if (reward === 3) msg += ' (Backgammon!)';
-  } else if (s.needs_dice && s.current_player === 0) {
+    document.querySelector('.color-picker').classList.remove('locked');
+  } else if (s.needs_dice && s.current_player === humanPlayer) {
     msg = 'Your turn - roll dice';
-  } else if (s.current_player === 0) {
+  } else if (s.current_player === humanPlayer) {
     msg = 'Your turn - select a checker to move';
   } else {
     msg = "AI's turn";

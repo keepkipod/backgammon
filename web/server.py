@@ -31,6 +31,7 @@ from backgammon.backgammon_game import (
     BackgammonGame,
     BackgammonState,
     _checker_count,
+    _get_sub_moves_for_die,
 )
 from backgammon.mcts import MCTS
 from backgammon.network import DualHeadNetwork, get_device
@@ -62,6 +63,7 @@ state: Optional[BackgammonState] = None
 network: Optional[DualHeadNetwork] = None
 device: Optional[torch.device] = None
 ai_simulations: int = 200  # configurable difficulty
+human_player: int = 0  # which player the human controls (0=white, 1=brown)
 
 
 def _state_to_json(s: BackgammonState) -> dict:
@@ -75,6 +77,7 @@ def _state_to_json(s: BackgammonState) -> dict:
         "needs_dice": s.needs_dice,
         "game_over": s.game_over,
         "winner": s.winner,
+        "human_player": human_player,
         "legal_actions": [
             {"source": src, "die": die}
             for src, die in game.get_legal_actions(s)
@@ -225,16 +228,51 @@ def serve_static(path):
 
 @app.route("/api/new-game", methods=["POST"])
 def new_game():
-    global state
+    global state, human_player
+    data = request.get_json(silent=True) or {}
+    human_player = data.get("color", 0)  # 0=white, 1=brown
+
     state = game.get_initial_state()
-    # Roll initial dice
-    outcomes = game.get_chance_outcomes(state)
-    rolls = [o for o, _ in outcomes]
-    probs = [p for _, p in outcomes]
-    idx = np.random.choice(len(rolls), p=probs)
-    state = game.apply_chance_outcome(state, rolls[idx])
+
+    # Opening roll: each player rolls one die, higher goes first
+    while True:
+        human_die = random.randint(1, 6)
+        ai_die = random.randint(1, 6)
+        if human_die != ai_die:
+            break  # re-roll on ties
+
+    if human_die > ai_die:
+        first_player = human_player
+    else:
+        first_player = 1 - human_player
+
+    # Apply the opening dice to the starting player
+    state.current_player = first_player
+    d1, d2 = max(human_die, ai_die), min(human_die, ai_die)
+    state.dice_remaining = [d1, d2]
+    state.needs_dice = False
+
+    # Check if first player has any legal moves
+    has_moves = False
+    tried = set()
+    for d in state.dice_remaining:
+        if d in tried:
+            continue
+        tried.add(d)
+        if _get_sub_moves_for_die(state, first_player, d):
+            has_moves = True
+            break
+    if not has_moves:
+        state.dice_remaining = []
+        state.current_player = 1 - first_player
+        state.needs_dice = True
 
     response = _state_to_json(state)
+    response["opening_roll"] = {
+        "human_die": human_die,
+        "ai_die": ai_die,
+        "first_player": first_player,
+    }
     response["analysis"] = _get_ai_analysis(state) if not state.needs_dice else {"win_prob": 0.5, "top_moves": [], "available": network is not None}
     return jsonify(response)
 
@@ -267,6 +305,66 @@ def make_move():
         response["analysis"] = _get_ai_analysis(state)
 
     return jsonify(response)
+
+
+@app.route("/api/compound-moves", methods=["POST"])
+def compound_moves():
+    """Get all reachable destinations from a source, including multi-die compounds.
+
+    Returns single-die moves and compound moves (2+ dice on the same checker).
+    Each result has a dest and the action sequence to get there.
+    """
+    if state is None:
+        return jsonify({"error": "No game in progress"}), 400
+
+    data = request.json
+    source = data["source"]
+    player = state.current_player
+
+    def calc_dest(src, die_val, p):
+        if src == BAR:
+            return die_val - 1 if p == 1 else NUM_POINTS - die_val
+        d = src + die_val if p == 1 else src - die_val
+        return -1 if d < 0 or d >= NUM_POINTS else d
+
+    results = []  # [{dest, actions: [{source, die}, ...], is_compound}]
+    seen = set()  # (dest, tuple of actions) for dedup
+
+    def explore(s, current_src, actions_so_far):
+        legal = game.get_legal_actions(s)
+        for src, die in legal:
+            if src != current_src:
+                continue
+            dest = calc_dest(src, die, player)
+            new_actions = actions_so_far + [{"source": int(src), "die": int(die)}]
+            action_key = (dest, tuple((a["source"], a["die"]) for a in new_actions))
+            if action_key not in seen:
+                seen.add(action_key)
+                results.append({
+                    "dest": int(dest),
+                    "actions": new_actions,
+                    "is_compound": len(new_actions) > 1,
+                })
+            # Recurse if the checker can continue moving
+            if dest >= 0 and dest < NUM_POINTS:
+                new_state = game.apply_action(s, (src, die))
+                if (not new_state.game_over
+                        and not new_state.needs_dice
+                        and new_state.current_player == player):
+                    explore(new_state, dest, new_actions)
+
+    explore(state, source, [])
+
+    # Deduplicate: keep shortest action sequence per destination
+    best = {}
+    for r in results:
+        d = r["dest"]
+        if d not in best or len(r["actions"]) < len(best[d]["actions"]):
+            best[d] = r
+    # Also add compound-only entries (longer paths to same dest)
+    compound_results = list(best.values())
+
+    return jsonify({"moves": compound_results})
 
 
 @app.route("/api/roll-dice", methods=["POST"])
@@ -351,12 +449,18 @@ def ai_move():
 
         # Compute destination for the UI trace
         src, die_val = action
+        ai_player = 1 - human_player
         if src == BAR:
-            dest = die_val - 1  # AI is player 1, enters from bar
+            dest = die_val - 1 if ai_player == 1 else NUM_POINTS - die_val
         else:
-            dest = src + die_val
-            if dest >= NUM_POINTS:
-                dest = -1  # bearing off
+            if ai_player == 1:
+                dest = src + die_val
+                if dest >= NUM_POINTS:
+                    dest = -1  # bearing off
+            else:
+                dest = src - die_val
+                if dest < 0:
+                    dest = -1  # bearing off
 
         state = game.apply_action(state, action)
         moves_made.append({"source": int(src), "die": int(die_val), "dest": int(dest)})
