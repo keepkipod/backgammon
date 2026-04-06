@@ -449,12 +449,26 @@ class Trainer:
             "config": self.config.__dict__,
             "training_history": self.training_history[-1000:],  # keep last 1000 entries
         }
-        torch.save(checkpoint, path)
+        # Atomic save: write to temp file then rename to avoid corruption on disk-full
+        tmp_path = path + ".tmp"
+        torch.save(checkpoint, tmp_path)
+        os.replace(tmp_path, path)
         logger.info(f"Checkpoint saved: {path}")
 
-        # Also save a "latest" symlink/copy for easy resume
+        # Also save a "latest" copy for easy resume
         latest_path = os.path.join(self.config.checkpoint_dir, "latest.pt")
-        torch.save(checkpoint, latest_path)
+        tmp_latest = latest_path + ".tmp"
+        torch.save(checkpoint, tmp_latest)
+        os.replace(tmp_latest, latest_path)
+
+        # Keep only the last 3 numbered checkpoints to avoid filling disk
+        import glob
+        checkpoint_files = sorted(glob.glob(
+            os.path.join(self.config.checkpoint_dir, "checkpoint_*.pt")
+        ))
+        for old_ckpt in checkpoint_files[:-3]:
+            os.remove(old_ckpt)
+            logger.info(f"Removed old checkpoint: {old_ckpt}")
 
     def load_checkpoint(self, path: str):
         """Resume training from a checkpoint."""
