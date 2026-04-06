@@ -10,10 +10,9 @@
 | 4. Web GUI & Tutor | **DONE** | `web/server.py`, `web/static/index.html` | 10 passing |
 
 ### What's Next
-1. **Train the model** on Colab/Kaggle using the free-tier strategy below
-2. **Run micro/mini training** stages (Section 3.6) to validate before committing to full training
-3. **Benchmark** against GNU Backgammon once model is trained
-4. **GUI polish** — equity graph, post-game review (listed in Phase 4.3 but not yet implemented)
+1. **Continue training** on Vast.ai (generation 0, step ~8900+ as of 2026-04-06)
+2. **Benchmark** against GNU Backgammon once model is trained
+3. **GUI polish** — equity graph, post-game review (listed in Phase 4.3 but not yet implemented)
 
 ---
 
@@ -222,6 +221,34 @@ The training loop asserts on every step and pauses with an alert (rather than bu
 - Self-play games average ~350 sub-moves. `max_game_length` must be ≥1000 to avoid premature termination.
 - The self-play and eval game loops must handle no-legal-moves by skipping the turn (setting dice_remaining=[], flipping player, needs_dice=True) — mirroring the env logic.
 
+### Bugs Found & Fixed (2026-04-06)
+
+**Game Engine Bugs (affected training data quality):**
+
+1. **Bearing off exact roll denied** (`backgammon_game.py:_get_sub_moves_for_die`): Exact bear-offs (e.g., die 5 from the 5-point) were blocked when checkers existed on higher points. The condition `src - die >= 0` was meant to detect exact bear-off but was always false in the bearing-off branch. Fix: explicit check for `src - die == -1` (player 0) / `src + die == 24` (player 1).
+
+2. **Move dedup hiding valid first moves** (`backgammon_game.py:_get_legal_full_turns`): Sequences were deduplicated by sorted form, so `[(21,6),(5,4)]` and `[(5,4),(21,6)]` collapsed to one entry. Since `get_legal_actions` only extracts the first move of each sequence, valid first moves disappeared. Measured impact: ~12% of legal moves hidden in ~32% of positions. Fix: deduplicate by exact sequence order.
+
+**Training Infrastructure:**
+
+3. **Checkpoint corruption on disk full** (`trainer.py:save_checkpoint`): `torch.save` wrote directly to target file; disk-full mid-write corrupted the checkpoint. Fix: atomic saves (write `.tmp`, then `os.replace`) + auto-delete old checkpoints (keep last 3).
+
+**Performance (MCTS and server):**
+
+4. **MCTS sequential network calls** (`mcts.py`): Each simulation made an individual forward pass. 200 sims × 2-4 sub-moves = 400-800 round-trips. Fix: batched MCTS with virtual loss — collect multiple leaves, evaluate in single forward pass. Added `predict_batch()` to network. Result: 200 sims ~0.3s/turn (was 30-120s+).
+
+5. **Server analysis sequential calls** (`server.py`): `_get_ai_analysis` and `_detect_blunder` evaluated every legal move one-by-one. Fix: batch all evaluations into a single `predict_batch()` call.
+
+6. **MPS overhead for small networks** (`server.py`): Per-call GPU dispatch overhead on Apple MPS exceeded actual compute time. Fix: force CPU for web server inference.
+
+**Server Bugs:**
+
+7. **numpy int64 JSON serialization crash** (`server.py`): AI move endpoint returned 500. Fix: custom `NumpyJSONProvider` for Flask.
+
+8. **`--simulations 0` wrong function signature** (`server.py`): Called `network.predict(game, state)` instead of `network.predict(state_tensor, legal_mask)`.
+
+**Training Impact Assessment:** Bugs #1 and #2 affected all training data generated so far. However, ~88% of correct moves were still available, and the model learned reasonable board evaluation. Existing checkpoints are usable as a starting point — the model will adapt to the corrected action space on resumed training.
+
 ---
 
 ## Phase 4: GUI & Tutor — COMPLETE (base features)
@@ -250,13 +277,14 @@ The training loop asserts on every step and pauses with an alert (rather than bu
 ### Milestone: A human can play a full game against the AI with real-time win probability and blunder alerts. **ACHIEVED (base features) — 10 API tests passing.**
 
 ### What's Implemented
-- Canvas-rendered board with click-to-move and borne-off tray
-- Dice display, legal move highlighting (green = legal destination, yellow = selected source)
-- AI opponent via MCTS (or random if no model loaded)
+- Canvas-rendered board with click-to-move and borne-off tray (widened to avoid point 24 / OFF tray collision)
+- Dice display, three-color highlight system: blue = legal sources, green = valid destinations, red = blunder destinations (>5% equity drop)
+- Context-aware status messages when a checker can't move (blocked/can't bear off vs forced maximization rule)
+- AI opponent via batched MCTS (or raw network policy with `--simulations 0`, or random if no model loaded)
 - Win probability bar (real-time, from value head)
-- Top-5 move analysis with equity percentages
-- Blunder detection (>5% equity drop alerts)
-- Difficulty slider (controls MCTS simulation count, 5–500)
+- Top-5 move analysis with equity percentages (batched evaluation)
+- Blunder detection with pre-move warning via red destination highlights + post-move alert
+- Difficulty slider (controls MCTS simulation count, 0–500; 0 = instant raw network policy)
 
 ### Not Yet Implemented (Future Polish)
 - Equity graph (running chart over game course)

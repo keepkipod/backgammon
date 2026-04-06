@@ -12,7 +12,7 @@ Backgammon AI with AlphaZero-style architecture — a "Superhuman Backgammon Tut
 
 ## Current Status
 
-**All 4 phases are implemented and tested.** No model has been trained yet — the next step is cloud training.
+**All 4 phases are implemented and tested.** Training is in progress on Vast.ai (generation 0, step ~8900+).
 
 | Phase | Status | Tests |
 |---|---|---|
@@ -21,7 +21,7 @@ Backgammon AI with AlphaZero-style architecture — a "Superhuman Backgammon Tut
 | 3. AI Training Pipeline | Complete | 11 tests (test_training.py) |
 | 4. Web GUI & Tutor | Complete | 10 tests (test_server.py) |
 
-**Next steps:** Train the model on Colab/Kaggle (see WORKPLAN.md "Cloud Training Strategy"), then run the web UI with the trained checkpoint.
+**Next steps:** Continue training on Vast.ai, then benchmark against GNU Backgammon.
 
 ## Commands
 
@@ -67,15 +67,15 @@ pip3 install -r requirements.txt
 - `env.py` — Gymnasium wrapper. Agent is always player 0. Opponent is pluggable (`random_opponent` default, `None` for self-play). Critical method: `_advance_to_agent_turn()` — unified loop that handles dice rolling, opponent sub-moves, and no-move turn skipping. This was the trickiest part (both players can have no-move rolls back-to-back).
 
 ### AI Training (`backgammon/`, `train.py`, `config.yaml`)
-- `network.py` — `DualHeadNetwork`: ResNet with configurable residual blocks, policy head (logits over 151 actions), value head (tanh scalar). `predict()` method handles legal move masking + softmax.
-- `mcts.py` — `MCTS` class with `DecisionNode` and `ChanceNode`. Chance nodes lazily expand dice outcomes. PUCT selection at decision nodes, probability-weighted sampling at chance nodes. Dirichlet noise at root for self-play exploration.
-- `trainer.py` — `Trainer` class: self-play game generation, `ReplayBuffer`, training loop (MSE value + cross-entropy policy loss), champion evaluation gating (55% win rate), checkpoint save/load (includes network, optimizer, buffer, history). Health checks: NaN/Inf detection, entropy collapse warning.
+- `network.py` — `DualHeadNetwork`: ResNet with configurable residual blocks, policy head (logits over 151 actions), value head (tanh scalar). `predict()` for single-state inference, `predict_batch()` for batched inference (used by MCTS and server analysis).
+- `mcts.py` — `MCTS` class with `DecisionNode` and `ChanceNode`. Batched leaf evaluation with virtual loss for parallel tree traversal. Chance nodes lazily expand dice outcomes. PUCT selection at decision nodes, probability-weighted sampling at chance nodes. Dirichlet noise at root for self-play exploration.
+- `trainer.py` — `Trainer` class: self-play game generation, `ReplayBuffer`, training loop (MSE value + cross-entropy policy loss), champion evaluation gating (55% win rate), checkpoint save/load (includes network, optimizer, buffer, history). Atomic checkpoint saves (write to `.tmp` then rename) with auto-cleanup (keeps last 3). Health checks: NaN/Inf detection, entropy collapse warning.
 - `train.py` — CLI entry point. `--smoke-test` validates full pipeline in ~6s. `--config` loads YAML. `--resume-from` restores from checkpoint.
 - `config.yaml` — All hyperparameters with documented defaults.
 
 ### Web UI (`web/`)
-- `server.py` — Flask REST API. Endpoints: `/api/new-game`, `/api/move`, `/api/roll-dice`, `/api/ai-move`, `/api/analysis`, `/api/set-difficulty`. AI analysis includes: win probability (value head), top-5 move equity (evaluates each resulting state), blunder detection (>5% equity drop threshold). Loads model checkpoint on startup if provided.
-- `static/index.html` — Single-page canvas app. Click-to-move: click source checker, then click destination (or borne-off tray). Green highlights show legal destinations. UI panels: dice, win probability bar, top moves with equity %, blunder alerts, difficulty slider (controls MCTS simulation count).
+- `server.py` — Flask REST API. Endpoints: `/api/new-game`, `/api/move`, `/api/roll-dice`, `/api/ai-move`, `/api/analysis`, `/api/set-difficulty`. AI analysis and blunder detection use batched network evaluation (single forward pass for all legal moves). Uses `--simulations 0` for raw network policy (instant) or `--simulations N` for MCTS. Forces CPU for inference (faster than MPS for this network size). Custom `NumpyJSONProvider` handles numpy type serialization.
+- `static/index.html` — Single-page canvas app. Click-to-move: click source checker, then click destination (or borne-off tray). Three-color highlight system: blue = legal sources, green = valid destinations, red = blunder destinations (>5% equity drop). Context-aware status messages explain why a checker can't move (blocked vs maximization rule). UI panels: dice, win probability bar, top moves with equity %, blunder alerts, difficulty slider (controls MCTS simulation count, 0 = raw network).
 
 ### Tests (`tests/`)
 - `test_game_engine.py` — 140 tests: initial state, dice, move generation (bar entry, hitting, blocking), bearing off (exact, larger die, farthest checker rule), forced maximization, game flow, rewards (normal/gammon/backgammon), encoding, action space roundtrip, immutability, 100 random game simulations with checker count invariant.
@@ -90,5 +90,6 @@ pip3 install -r requirements.txt
 - **No doubling cube:** Simplifies engine, action space, and value output.
 - **Stochastic MCTS with chance nodes:** 21 distinct dice outcomes as probability-weighted branches. Lazily expanded to save memory.
 - **State encoding:** 197 floats — 4 features per point per player (thresholded counts) + bar + borne-off + current player.
-- **Checkpoint-resume design:** `train.py --resume-from` reconstructs full state. Aggressive checkpointing for cloud sessions that die unexpectedly.
+- **Checkpoint-resume design:** `train.py --resume-from` reconstructs full state. Atomic saves (temp file + rename) prevent corruption on disk-full. Auto-cleanup keeps last 3 checkpoints.
+- **Batched MCTS:** Virtual loss enables parallel tree traversal; leaf nodes evaluated in a single batched forward pass. 200 simulations in ~0.15s per sub-move on CPU.
 - **Multi-game modularity:** `GameState` interface → `MCTS` module → `Network` module. Adding a new game = implement `GameState` only.

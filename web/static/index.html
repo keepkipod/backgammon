@@ -58,6 +58,10 @@ canvas { border-radius: 8px; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,
 .slider-container input[type=range] { flex: 1; }
 .slider-label { font-size: 0.8em; color: #888; min-width: 40px; }
 
+/* Toggle */
+.toggle-row { display: flex; align-items: center; gap: 8px; font-size: 0.85em; margin-top: 6px; }
+.toggle-row input[type=checkbox] { accent-color: #c4a35a; width: 16px; height: 16px; }
+
 /* Game info */
 .game-info { display: flex; justify-content: space-between; font-size: 0.85em; }
 .player-info { display: flex; align-items: center; gap: 6px; }
@@ -94,7 +98,6 @@ canvas { border-radius: 8px; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,
 
     <div class="card">
       <div class="btn-row">
-        <button class="btn btn-primary" id="btn-new" onclick="newGame()">New Game</button>
         <button class="btn btn-secondary" id="btn-roll" onclick="rollDice()" disabled>Roll Dice</button>
         <button class="btn btn-secondary" id="btn-ai" onclick="aiMove()" disabled>AI Turn</button>
       </div>
@@ -125,6 +128,14 @@ canvas { border-radius: 8px; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,
         <input type="range" min="5" max="500" value="200" id="difficulty" onchange="setDifficulty(this.value)">
         <span class="slider-label">Hard</span>
       </div>
+      <div class="toggle-row">
+        <input type="checkbox" id="toggle-hints" checked onchange="toggleHints(this.checked)">
+        <label for="toggle-hints">Show best move hint</label>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: auto;">
+      <button class="btn btn-primary" id="btn-new" onclick="newGame()" style="width: 100%;">New Game</button>
     </div>
   </div>
 </div>
@@ -134,6 +145,9 @@ canvas { border-radius: 8px; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,
 let gameState = null;
 let selectedSource = null;
 let hoveredPoint = null;
+let aiMoveTrace = [];     // [{source, dest, die}, ...] — AI's last turn moves
+let aiLastDice = null;    // dice the AI rolled, shown until player rolls
+let showHints = true;     // toggle for best-move hint
 
 const BOARD_W = 840, BOARD_H = 500;
 const MARGIN = 30;
@@ -157,6 +171,8 @@ const CHECKER_BROWN = '#4a3728';
 const SOURCE_HIGHLIGHT = 'rgba(0, 160, 255, 0.45)';      // blue — legal sources
 const DEST_HIGHLIGHT = 'rgba(0, 220, 100, 0.45)';        // green — destinations
 const BLUNDER_HIGHLIGHT = 'rgba(255, 50, 80, 0.55)';     // red — blunder warning
+const HINT_HIGHLIGHT = 'rgba(255, 215, 0, 0.5)';         // gold — best move hint
+const AI_TRACE_COLOR = 'rgba(255, 165, 0, 0.85)';        // orange — AI move trace
 
 // ─── Drawing ────────────────────────────────────────────────────────
 
@@ -324,7 +340,7 @@ function drawState() {
     ? s.analysis.top_moves[0] : null;
   const BLUNDER_THRESHOLD = 0.05; // 5% equity drop
 
-  // Highlight legal source points (blue)
+  // Highlight legal source points (blue), with best move hint (gold)
   if (selectedSource === null && s.current_player === 0) {
     const sources = new Set(legal.map(a => a.source));
     sources.forEach(src => {
@@ -333,6 +349,16 @@ function drawState() {
     if (sources.has(BAR_IDX)) {
       ctx.fillStyle = SOURCE_HIGHLIGHT;
       ctx.fillRect(BOARD_W / 2 - BAR_W / 2, BOARD_H / 2 - 40, BAR_W, 80);
+    }
+    // Best-move hint: highlight the source of the top move in gold
+    if (showHints && bestMove && legal.length > 0) {
+      const hintSrc = bestMove.source;
+      if (hintSrc < 24) {
+        drawPointHighlight(hintSrc, HINT_HIGHLIGHT);
+      } else if (hintSrc === BAR_IDX) {
+        ctx.fillStyle = HINT_HIGHLIGHT;
+        ctx.fillRect(BOARD_W / 2 - BAR_W / 2, BOARD_H / 2 - 40, BAR_W, 80);
+      }
     }
   }
 
@@ -434,6 +460,79 @@ function drawState() {
       const labelY = player === 1 ? MARGIN + 10 + s.borne_off[player] * 8 + 14 : BOARD_H - MARGIN - 10 - s.borne_off[player] * 8 - 8;
       ctx.fillText(s.borne_off[player] + '/15', bx, labelY);
     }
+  }
+
+  // Draw AI move trace arrows
+  if (aiMoveTrace.length > 0) {
+    drawAiTrace();
+  }
+}
+
+function drawAiTrace() {
+  for (let i = 0; i < aiMoveTrace.length; i++) {
+    const move = aiMoveTrace[i];
+    const stepLabel = String(i + 1);
+    const dieLabel = String(move.die);
+
+    // Source position — offset Y slightly per step to avoid overlapping arrows
+    const yOffset = (i - (aiMoveTrace.length - 1) / 2) * 8;
+    let sx, sy;
+    if (move.source === BAR_IDX) {
+      sx = barX();
+      sy = BOARD_H / 2 + yOffset;
+    } else {
+      sx = pointX(move.source);
+      sy = (move.source >= 12 ? MARGIN + POINT_H / 2 : BOARD_H - MARGIN - POINT_H / 2) + yOffset;
+    }
+
+    // Destination position
+    let dx, dy;
+    if (move.dest < 0 || move.dest >= 24) {
+      // Bearing off
+      dx = borneOffX();
+      dy = MARGIN + POINT_H / 2 + yOffset; // AI is top
+    } else {
+      dx = pointX(move.dest);
+      dy = (move.dest >= 12 ? MARGIN + POINT_H / 2 : BOARD_H - MARGIN - POINT_H / 2) + yOffset;
+    }
+
+    // Draw arrow line
+    ctx.strokeStyle = AI_TRACE_COLOR;
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(dx, dy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Draw arrowhead
+    const angle = Math.atan2(dy - sy, dx - sx);
+    const headLen = 10;
+    ctx.fillStyle = AI_TRACE_COLOR;
+    ctx.beginPath();
+    ctx.moveTo(dx, dy);
+    ctx.lineTo(dx - headLen * Math.cos(angle - 0.4), dy - headLen * Math.sin(angle - 0.4));
+    ctx.lineTo(dx - headLen * Math.cos(angle + 0.4), dy - headLen * Math.sin(angle + 0.4));
+    ctx.closePath();
+    ctx.fill();
+
+    // Draw label at midpoint: step# and die value
+    const mx = (sx + dx) / 2;
+    const my2 = (sy + dy) / 2;
+    const labelText = stepLabel + '\u2192' + dieLabel;
+    ctx.beginPath();
+    ctx.arc(mx, my2, 14, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+    ctx.fill();
+    ctx.strokeStyle = AI_TRACE_COLOR;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.fillStyle = AI_TRACE_COLOR;
+    ctx.font = 'bold 10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(labelText, mx, my2);
   }
 }
 
@@ -551,11 +650,15 @@ async function apiCall(url, method = 'GET', body = null) {
 async function newGame() {
   gameState = await apiCall('/api/new-game', 'POST');
   selectedSource = null;
+  aiMoveTrace = [];
+  aiLastDice = null;
   hideBlunder();
   updateUI();
 }
 
 async function rollDice() {
+  aiMoveTrace = [];   // clear AI trace when player starts their turn
+  aiLastDice = null;  // clear AI dice display
   gameState = await apiCall('/api/roll-dice', 'POST');
   updateUI();
 }
@@ -579,12 +682,22 @@ async function aiMove() {
   document.getElementById('btn-ai').disabled = true;
   const data = await apiCall('/api/ai-move', 'POST');
   gameState = data;
+  aiMoveTrace = data.ai_moves || [];
+  // Reconstruct AI dice from moves (e.g. two moves with die 3,5 → rolled [3,5])
+  if (aiMoveTrace.length > 0) {
+    aiLastDice = aiMoveTrace.map(m => m.die);
+  }
   hideBlunder();
   updateUI();
 }
 
 async function setDifficulty(val) {
   await apiCall('/api/set-difficulty', 'POST', { simulations: parseInt(val) });
+}
+
+function toggleHints(enabled) {
+  showHints = enabled;
+  drawState();
 }
 
 // ─── UI Updates ─────────────────────────────────────────────────────
@@ -602,16 +715,28 @@ function updateUI() {
 function updateDice() {
   const container = document.getElementById('dice');
   container.innerHTML = '';
-  if (!gameState.dice_remaining) return;
 
-  // Show original roll (group remaining dice)
-  const dice = gameState.dice_remaining;
-  dice.forEach(d => {
-    const el = document.createElement('div');
-    el.className = 'die';
-    el.textContent = d;
-    container.appendChild(el);
-  });
+  const s = gameState;
+  // Show current dice if available
+  if (s.dice_remaining && s.dice_remaining.length > 0) {
+    s.dice_remaining.forEach(d => {
+      const el = document.createElement('div');
+      el.className = 'die';
+      el.textContent = d;
+      container.appendChild(el);
+    });
+    return;
+  }
+
+  // If player needs to roll, show the AI's last dice (dimmed) so they can see what AI rolled
+  if (aiLastDice && s.needs_dice && s.current_player === 0) {
+    aiLastDice.forEach(d => {
+      const el = document.createElement('div');
+      el.className = 'die used';
+      el.textContent = d;
+      container.appendChild(el);
+    });
+  }
 }
 
 function updateAnalysis() {

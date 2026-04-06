@@ -348,8 +348,17 @@ def ai_move():
         else:
             action = random.choice(legal)
 
+        # Compute destination for the UI trace
+        src, die_val = action
+        if src == BAR:
+            dest = die_val - 1  # AI is player 1, enters from bar
+        else:
+            dest = src + die_val
+            if dest >= NUM_POINTS:
+                dest = -1  # bearing off
+
         state = game.apply_action(state, action)
-        moves_made.append({"source": action[0], "die": action[1]})
+        moves_made.append({"source": int(src), "die": int(die_val), "dest": int(dest)})
 
     response = _state_to_json(state)
     response["ai_moves"] = moves_made
