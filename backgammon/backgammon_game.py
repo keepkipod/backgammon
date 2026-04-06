@@ -312,12 +312,13 @@ def _get_legal_full_turns(state: BackgammonState) -> list[list[tuple[int, int]]]
 
     sequences = _generate_all_turn_sequences(state, player, dice)
 
-    # Deduplicate: different orderings of the same moves can yield identical results
-    # We keep unique sequences by their sorted form
+    # Deduplicate: keep unique sequences, but preserve different orderings
+    # since get_legal_actions extracts first moves from these sequences.
+    # Two sequences are identical only if they have the same moves in the same order.
     seen = set()
     unique = []
     for seq in sequences:
-        key = tuple(sorted(seq))
+        key = tuple(seq)
         if key not in seen:
             seen.add(key)
             unique.append(seq)

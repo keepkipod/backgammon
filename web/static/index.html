@@ -72,7 +72,7 @@ canvas { border-radius: 8px; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,
 
 <div class="game-container">
   <div class="board-wrapper">
-    <canvas id="board" width="780" height="500"></canvas>
+    <canvas id="board" width="840" height="500"></canvas>
   </div>
 
   <div class="panel">
@@ -135,11 +135,11 @@ let gameState = null;
 let selectedSource = null;
 let hoveredPoint = null;
 
-const BOARD_W = 780, BOARD_H = 500;
+const BOARD_W = 840, BOARD_H = 500;
 const MARGIN = 30;
 const BAR_W = 40;
 const TRAY_W = 36;  // borne-off tray width
-const POINT_W = (BOARD_W - 2 * MARGIN - BAR_W) / 12;
+const POINT_W = (BOARD_W - 2 * MARGIN - BAR_W - TRAY_W - 10) / 12;
 const POINT_H = 200;
 const CHECKER_R = POINT_W / 2 - 2;
 const BAR_IDX = 24;
@@ -197,7 +197,7 @@ function barX() {
 }
 
 function borneOffX() {
-  return BOARD_W - MARGIN - TRAY_W + 5 + TRAY_W / 2;
+  return BOARD_W - MARGIN / 2 - TRAY_W / 2;
 }
 
 function borneOffY(player, idx) {
@@ -243,7 +243,7 @@ function drawBoard() {
   }
 
   // Borne-off trays
-  const trayX = BOARD_W - MARGIN - TRAY_W + 5;
+  const trayX = BOARD_W - MARGIN / 2 - TRAY_W;
   const trayH = (BOARD_H - 2 * MARGIN + 10) / 2 - 5;
   // Player 1 (AI / Brown) — top
   ctx.fillStyle = '#1e3d1e';
@@ -258,8 +258,8 @@ function drawBoard() {
   ctx.font = '9px sans-serif';
   ctx.textAlign = 'center';
   ctx.fillStyle = '#888';
-  ctx.fillText('OFF', trayX + TRAY_W / 2, MARGIN - 10);
-  ctx.fillText('OFF', trayX + TRAY_W / 2, BOARD_H - MARGIN + 18);
+  ctx.fillText('OFF', trayX + TRAY_W / 2, MARGIN - 8);
+  ctx.fillText('OFF', trayX + TRAY_W / 2, BOARD_H - MARGIN + 16);
 
   // Point numbers
   ctx.font = '10px sans-serif';
@@ -372,7 +372,7 @@ function drawState() {
     });
     // Highlight borne-off tray if bearing off is possible
     if (hasBearOff) {
-      const trayX = BOARD_W - MARGIN - TRAY_W + 5;
+      const trayX = BOARD_W - MARGIN / 2 - TRAY_W;
       const trayH = (BOARD_H - 2 * MARGIN + 10) / 2 - 5;
       ctx.fillStyle = HIGHLIGHT;
       if (s.current_player === 0) {
@@ -439,7 +439,7 @@ function drawState() {
 
 function getClickedPoint(mx, my) {
   // Check borne-off tray
-  const trayX = BOARD_W - MARGIN - TRAY_W + 5;
+  const trayX = BOARD_W - MARGIN / 2 - TRAY_W;
   if (mx >= trayX && mx <= trayX + TRAY_W) {
     if (my >= MARGIN - 5 && my <= BOARD_H - MARGIN + 5) {
       return TRAY_CLICK_ID;
@@ -485,6 +485,15 @@ canvas.addEventListener('click', function(e) {
       if (hasMove) {
         selectedSource = clicked;
         drawState();
+      } else {
+        // Check if the player has a checker here but it's not a legal source
+        const idx = clicked;
+        const hasOwnChecker = idx >= 0 && idx < 24 &&
+          ((gameState.current_player === 0 && gameState.points[idx] > 0) ||
+           (gameState.current_player === 1 && gameState.points[idx] < 0));
+        if (hasOwnChecker) {
+          setStatus('That checker can\'t move \u2014 you must use all dice if possible (maximization rule)');
+        }
       }
     }
   } else {

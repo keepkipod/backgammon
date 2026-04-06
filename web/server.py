@@ -282,20 +282,32 @@ def ai_move():
             break
 
         if network is not None:
-            mcts = MCTS(
-                game=game,
-                network=network,
-                device=device,
-                num_simulations=ai_simulations,
-                dirichlet_alpha=0.0,
-                dirichlet_epsilon=0.0,
-                temperature=0.1,
-            )
-            policy, _ = mcts.search(state)
-            action_idx = np.argmax(policy)
-            action = game.index_to_action(action_idx)
-            if action not in legal:
-                action = random.choice(legal)
+            if ai_simulations <= 0:
+                # Direct network policy — no MCTS, instant moves
+                state_tensor = torch.FloatTensor(game.encode_state(state)).to(device)
+                legal_mask = torch.zeros(game.get_action_space_size(), device=device)
+                for a in legal:
+                    legal_mask[game.action_to_index(a)] = 1.0
+                policy, _ = network.predict(state_tensor, legal_mask)
+                policy = policy.cpu().numpy()
+                legal_indices = [game.action_to_index(a) for a in legal]
+                legal_probs = [(policy[i], a) for i, a in zip(legal_indices, legal)]
+                action = max(legal_probs, key=lambda x: x[0])[1]
+            else:
+                mcts = MCTS(
+                    game=game,
+                    network=network,
+                    device=device,
+                    num_simulations=ai_simulations,
+                    dirichlet_alpha=0.0,
+                    dirichlet_epsilon=0.0,
+                    temperature=0.1,
+                )
+                policy, _ = mcts.search(state)
+                action_idx = np.argmax(policy)
+                action = game.index_to_action(action_idx)
+                if action not in legal:
+                    action = random.choice(legal)
         else:
             action = random.choice(legal)
 
@@ -319,7 +331,7 @@ def get_analysis():
 def set_difficulty():
     global ai_simulations
     data = request.json
-    ai_simulations = max(5, min(1000, data.get("simulations", 200)))
+    ai_simulations = max(0, min(1000, data.get("simulations", 200)))
     return jsonify({"simulations": ai_simulations})
 
 
@@ -342,7 +354,9 @@ def main():
     args = parser.parse_args()
 
     ai_simulations = args.simulations
-    device = get_device()
+    # For inference with small networks, CPU is faster than MPS
+    # (avoids per-call GPU dispatch overhead in MCTS loop)
+    device = torch.device("cpu")
 
     if args.checkpoint and os.path.exists(args.checkpoint):
         logger.info(f"Loading model from {args.checkpoint}")
