@@ -46,9 +46,9 @@ canvas { border-radius: 8px; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,
 .move-item .equity { color: #c4a35a; }
 
 /* Blunder alert */
-.blunder-alert { background: #c0392b22; border: 1px solid #c0392b; border-radius: 8px; padding: 12px; display: none; }
+.blunder-alert { background: rgba(255, 50, 80, 0.12); border: 1px solid rgba(255, 50, 80, 0.7); border-radius: 8px; padding: 12px; display: none; }
 .blunder-alert.show { display: block; }
-.blunder-alert h3 { color: #e74c3c; }
+.blunder-alert h3 { color: #ff3250; }
 
 /* Status */
 .status { font-size: 1em; text-align: center; min-height: 24px; color: #c4a35a; }
@@ -154,8 +154,9 @@ const POINT_LIGHT = '#c4a35a';
 const POINT_DARK = '#8b4513';
 const CHECKER_WHITE = '#f0e6d3';
 const CHECKER_BROWN = '#4a3728';
-const HIGHLIGHT = 'rgba(46, 204, 113, 0.4)';
-const SELECTED_HIGHLIGHT = 'rgba(241, 196, 15, 0.5)';
+const SOURCE_HIGHLIGHT = 'rgba(0, 160, 255, 0.45)';      // blue — legal sources
+const DEST_HIGHLIGHT = 'rgba(0, 220, 100, 0.45)';        // green — destinations
+const BLUNDER_HIGHLIGHT = 'rgba(255, 50, 80, 0.55)';     // red — blunder warning
 
 // ─── Drawing ────────────────────────────────────────────────────────
 
@@ -294,27 +295,10 @@ function drawChecker(x, y, player, count) {
   }
 }
 
-function drawHighlight(pointIdx) {
+function drawPointHighlight(pointIdx, color) {
   const x = pointX(pointIdx);
   const isTop = pointIdx >= 12;
-  ctx.fillStyle = HIGHLIGHT;
-  ctx.beginPath();
-  if (isTop) {
-    ctx.moveTo(x - POINT_W / 2, MARGIN - 5);
-    ctx.lineTo(x + POINT_W / 2, MARGIN - 5);
-    ctx.lineTo(x, MARGIN + POINT_H);
-  } else {
-    ctx.moveTo(x - POINT_W / 2, BOARD_H - MARGIN + 5);
-    ctx.lineTo(x + POINT_W / 2, BOARD_H - MARGIN + 5);
-    ctx.lineTo(x, BOARD_H - MARGIN - POINT_H);
-  }
-  ctx.fill();
-}
-
-function drawSelectedHighlight(pointIdx) {
-  const x = pointX(pointIdx);
-  const isTop = pointIdx >= 12;
-  ctx.fillStyle = SELECTED_HIGHLIGHT;
+  ctx.fillStyle = color;
   ctx.beginPath();
   if (isTop) {
     ctx.moveTo(x - POINT_W / 2, MARGIN - 5);
@@ -335,28 +319,34 @@ function drawState() {
   const s = gameState;
   const legal = s.legal_actions || [];
 
-  // Highlight legal source points
+  // Determine best move from analysis for blunder detection
+  const bestMove = (s.analysis && s.analysis.top_moves && s.analysis.top_moves.length > 0)
+    ? s.analysis.top_moves[0] : null;
+  const BLUNDER_THRESHOLD = 0.05; // 5% equity drop
+
+  // Highlight legal source points (blue)
   if (selectedSource === null && s.current_player === 0) {
     const sources = new Set(legal.map(a => a.source));
     sources.forEach(src => {
-      if (src < 24) drawHighlight(src);
+      if (src < 24) drawPointHighlight(src, SOURCE_HIGHLIGHT);
     });
-    // Highlight bar if needed
     if (sources.has(BAR_IDX)) {
-      ctx.fillStyle = HIGHLIGHT;
+      ctx.fillStyle = SOURCE_HIGHLIGHT;
       ctx.fillRect(BOARD_W / 2 - BAR_W / 2, BOARD_H / 2 - 40, BAR_W, 80);
     }
   }
 
   // Highlight destinations for selected source
   if (selectedSource !== null) {
-    if (selectedSource < 24) drawSelectedHighlight(selectedSource);
+    // Highlight the selected source (blue, dimmer)
+    if (selectedSource < 24) drawPointHighlight(selectedSource, SOURCE_HIGHLIGHT);
     else {
-      ctx.fillStyle = SELECTED_HIGHLIGHT;
+      ctx.fillStyle = SOURCE_HIGHLIGHT;
       ctx.fillRect(BOARD_W / 2 - BAR_W / 2, BOARD_H / 2 - 40, BAR_W, 80);
     }
-    // Show destination highlights
+    // Show destination highlights (green for good, red for blunder)
     let hasBearOff = false;
+    let bearOffIsBlunder = false;
     legal.filter(a => a.source === selectedSource).forEach(a => {
       let dest;
       if (selectedSource === BAR_IDX) {
@@ -364,17 +354,29 @@ function drawState() {
       } else {
         dest = s.current_player === 0 ? selectedSource - a.die : selectedSource + a.die;
       }
+
+      // Check if this move is a blunder compared to the best move
+      let isBlunder = false;
+      if (bestMove && s.analysis && s.analysis.top_moves) {
+        const thisMove = s.analysis.top_moves.find(m => m.source === a.source && m.die === a.die);
+        if (thisMove && bestMove.equity - thisMove.equity > BLUNDER_THRESHOLD) {
+          isBlunder = true;
+        }
+      }
+
+      const color = isBlunder ? BLUNDER_HIGHLIGHT : DEST_HIGHLIGHT;
       if (dest >= 0 && dest < 24) {
-        drawHighlight(dest);
+        drawPointHighlight(dest, color);
       } else {
         hasBearOff = true;
+        if (isBlunder) bearOffIsBlunder = true;
       }
     });
     // Highlight borne-off tray if bearing off is possible
     if (hasBearOff) {
       const trayX = BOARD_W - MARGIN / 2 - TRAY_W;
       const trayH = (BOARD_H - 2 * MARGIN + 10) / 2 - 5;
-      ctx.fillStyle = HIGHLIGHT;
+      ctx.fillStyle = bearOffIsBlunder ? BLUNDER_HIGHLIGHT : DEST_HIGHLIGHT;
       if (s.current_player === 0) {
         ctx.fillRect(trayX, BOARD_H / 2 + 5, TRAY_W, trayH);
       } else {
@@ -492,7 +494,16 @@ canvas.addEventListener('click', function(e) {
           ((gameState.current_player === 0 && gameState.points[idx] > 0) ||
            (gameState.current_player === 1 && gameState.points[idx] < 0));
         if (hasOwnChecker) {
-          setStatus('That checker can\'t move \u2014 you must use all dice if possible (maximization rule)');
+          // Check if it's maximization or simply no moves for that checker
+          const allSources = new Set(gameState.legal_actions.map(a => a.source));
+          const availableDice = new Set(gameState.legal_actions.map(a => a.die));
+          const allDice = new Set(gameState.dice_remaining);
+          const blockedDice = [...allDice].filter(d => !availableDice.has(d));
+          if (blockedDice.length > 0) {
+            setStatus('That checker can\'t move \u2014 no legal destination (blocked or can\'t bear off yet)');
+          } else {
+            setStatus('That checker can\'t move \u2014 you must use all dice if possible (maximization rule)');
+          }
         }
       }
     }

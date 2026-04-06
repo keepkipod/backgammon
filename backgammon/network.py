@@ -133,3 +133,26 @@ class DualHeadNetwork(nn.Module):
             policy = F.softmax(logits, dim=0)
 
         return policy, value
+
+    def predict_batch(
+        self, state_tensors: torch.Tensor, legal_masks: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Batch inference with legal move masking.
+
+        Args:
+            state_tensors: shape (batch, input_size).
+            legal_masks: shape (batch, action_size). 1 = legal.
+
+        Returns:
+            policies: shape (batch, action_size).
+            values: shape (batch,).
+        """
+        self.eval()
+        with torch.no_grad():
+            logits, values = self(state_tensors)
+            values = values.squeeze(-1)
+
+            logits[legal_masks == 0] = float("-inf")
+            policies = F.softmax(logits, dim=1)
+
+        return policies, values

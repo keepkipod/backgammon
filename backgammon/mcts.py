@@ -101,6 +101,9 @@ class MCTS:
     def search(self, state: Any) -> tuple[np.ndarray, float]:
         """Run MCTS from the given state.
 
+        Uses batched neural network evaluation: collects multiple leaf nodes
+        per iteration and evaluates them in a single forward pass.
+
         Returns:
             policy: Probability distribution over action space, shape (action_size,).
             value: Estimated value of the root state.
@@ -109,47 +112,123 @@ class MCTS:
         self._expand_decision_node(root)
 
         if not root.children:
-            # No legal moves — return uniform policy and neutral value
             policy = np.zeros(self.game.get_action_space_size(), dtype=np.float32)
             return policy, 0.0
 
-        # Add Dirichlet noise to root for exploration
         if self.dirichlet_epsilon > 0:
             self._add_dirichlet_noise(root)
 
-        # Run simulations
-        for _ in range(self.num_simulations):
-            node = root
-            search_path = [node]
+        root_player = self.game.get_current_player(root.state)
+        batch_size = min(8, max(1, self.num_simulations // 4))
+        sims_done = 0
 
-            # SELECT: traverse tree to a leaf
-            while node.is_expanded and not self.game.is_terminal(node.state):
-                if self.game.is_chance_node(node.state):
-                    # At chance node, sample outcome
-                    chance = node.children.get("chance")
-                    if chance is None:
-                        break
-                    node = self._select_chance_outcome(chance)
-                    search_path.append(chance)
-                    search_path.append(node)
+        while sims_done < self.num_simulations:
+            current_batch = min(batch_size, self.num_simulations - sims_done)
+
+            # Phase 1: SELECT — traverse tree to find leaves, apply virtual loss
+            leaves = []  # (node, search_path, needs_nn)
+            for _ in range(current_batch):
+                node = root
+                search_path = [node]
+
+                while node.is_expanded and not self.game.is_terminal(node.state):
+                    if self.game.is_chance_node(node.state):
+                        chance = node.children.get("chance")
+                        if chance is None:
+                            break
+                        node = self._select_chance_outcome(chance)
+                        search_path.append(chance)
+                        search_path.append(node)
+                    else:
+                        action, node = self._select_child(node)
+                        search_path.append(node)
+
+                # Apply virtual loss to encourage diverse paths
+                for n in search_path:
+                    n.visit_count += 1
+                    if isinstance(n, DecisionNode):
+                        n.value_sum -= 1  # pessimistic bias
+
+                if self.game.is_terminal(node.state):
+                    value = self.game.get_reward(node.state, root_player)
+                    leaves.append((node, search_path, False, value))
                 else:
-                    action, node = self._select_child(node)
-                    search_path.append(node)
+                    leaves.append((node, search_path, True, None))
 
-            # EVALUATE leaf
-            if self.game.is_terminal(node.state):
-                # Use actual game outcome
-                value = self.game.get_reward(
-                    node.state, self.game.get_current_player(root.state)
-                )
-            else:
-                # Expand and evaluate with network
-                value = self._expand_decision_node(node)
+            # Phase 2: EXPAND & EVALUATE — batch all leaf nodes needing NN
+            nn_leaves = [(i, node, path) for i, (node, path, needs_nn, _) in enumerate(leaves) if needs_nn]
 
-            # BACKPROPAGATE
-            self._backpropagate(search_path, value, self.game.get_current_player(root.state))
+            if nn_leaves:
+                # Prepare batch tensors
+                state_tensors = []
+                legal_masks = []
+                leaf_infos = []  # (leaf_index, node, legal_actions or None)
 
-        # Build policy from root visit counts
+                for leaf_idx, node, path in nn_leaves:
+                    s = node.state
+                    enc = self.game.encode_state(s)
+                    state_tensors.append(enc)
+
+                    if self.game.is_chance_node(s):
+                        # Chance node — just need value, no policy
+                        legal_masks.append(np.zeros(self.game.get_action_space_size(), dtype=np.float32))
+                        leaf_infos.append((leaf_idx, node, None))
+                    else:
+                        legal_actions = self.game.get_legal_actions(s)
+                        mask = np.zeros(self.game.get_action_space_size(), dtype=np.float32)
+                        if legal_actions:
+                            for action in legal_actions:
+                                mask[self.game.action_to_index(action)] = 1.0
+                        legal_masks.append(mask)
+                        leaf_infos.append((leaf_idx, node, legal_actions))
+
+                # Single batched forward pass
+                batch_states = torch.FloatTensor(np.array(state_tensors)).to(self.device)
+                batch_masks = torch.FloatTensor(np.array(legal_masks)).to(self.device)
+                policies_batch, values_batch = self.network.predict_batch(batch_states, batch_masks)
+                policies_np = policies_batch.cpu().numpy()
+                values_np = values_batch.cpu().numpy()
+
+                # Expand each leaf
+                for j, (leaf_idx, node, legal_actions) in enumerate(leaf_infos):
+                    value = float(values_np[j])
+                    policy = policies_np[j]
+
+                    if legal_actions is None:
+                        # Chance node
+                        if not node.is_expanded:
+                            chance = ChanceNode(state=node.state, parent=node)
+                            outcomes = self.game.get_chance_outcomes(node.state)
+                            chance.outcome_probs = {o: p for o, p in outcomes}
+                            node.children["chance"] = chance
+                    elif legal_actions:
+                        if not node.is_expanded:
+                            for action in legal_actions:
+                                idx = self.game.action_to_index(action)
+                                child_state = self.game.apply_action(node.state, action)
+                                child = DecisionNode(
+                                    state=child_state,
+                                    parent=node,
+                                    parent_action=action,
+                                    prior=policy[idx],
+                                )
+                                node.children[action] = child
+
+                    # Store value back
+                    leaves[leaf_idx] = (leaves[leaf_idx][0], leaves[leaf_idx][1], False, value)
+
+            # Phase 3: BACKPROPAGATE — undo virtual loss and apply real values
+            for node, search_path, _, value in leaves:
+                # Undo virtual loss
+                for n in search_path:
+                    n.visit_count -= 1
+                    if isinstance(n, DecisionNode):
+                        n.value_sum += 1
+                # Real backprop
+                self._backpropagate(search_path, value, root_player)
+
+            sims_done += current_batch
+
         policy = self._get_policy(root)
         return policy, root.value
 

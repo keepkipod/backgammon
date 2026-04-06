@@ -37,7 +37,23 @@ from backgammon.network import DualHeadNetwork, get_device
 
 logger = logging.getLogger(__name__)
 
+from flask.json.provider import DefaultJSONProvider
+
+class NumpyJSONProvider(DefaultJSONProvider):
+    """JSON provider that handles numpy types."""
+    @staticmethod
+    def default(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return DefaultJSONProvider.default(obj)
+
 app = Flask(__name__, static_folder="static")
+app.json_provider_class = NumpyJSONProvider
+app.json = NumpyJSONProvider(app)
 
 # Global game state
 game = BackgammonGame()
@@ -66,51 +82,60 @@ def _state_to_json(s: BackgammonState) -> dict:
 
 
 def _get_ai_analysis(s: BackgammonState) -> dict:
-    """Get AI analysis: win probability and top moves with equity."""
+    """Get AI analysis: win probability and top moves with equity.
+
+    Uses batched network evaluation for all legal moves in a single forward pass.
+    """
     if network is None:
         return {"win_prob": 0.5, "top_moves": [], "available": False}
 
     network.eval()
-    state_tensor = torch.FloatTensor(game.encode_state(s)).to(device)
-    legal_mask = torch.zeros(ACTION_SPACE_SIZE, device=device)
     legal_actions = game.get_legal_actions(s)
-    for action in legal_actions:
-        legal_mask[game.action_to_index(action)] = 1.0
 
     if not legal_actions:
-        return {"win_prob": 0.5, "top_moves": [], "available": True}
+        # Just get win probability for current state
+        state_tensor = torch.FloatTensor(game.encode_state(s)).to(device)
+        legal_mask = torch.zeros(ACTION_SPACE_SIZE, device=device)
+        _, value = network.predict(state_tensor, legal_mask)
+        return {"win_prob": float((value + 1.0) / 2.0), "top_moves": [], "available": True}
 
-    # Get raw value estimate
-    policy, value = network.predict(state_tensor, legal_mask)
-    # Convert value from [-1, 1] to win probability [0, 1]
-    win_prob = (value + 1.0) / 2.0
-
-    # Get top moves with their policy weight (as proxy for equity)
-    policy_np = policy.cpu().numpy()
-    move_evals = []
+    # Build batch: current state + all resulting states
+    encodings = [game.encode_state(s)]
+    result_states = []
     for action in legal_actions:
+        new_state = game.apply_action(s, action)
+        encodings.append(game.encode_state(new_state))
+        result_states.append(new_state)
+
+    # Single batched forward pass
+    batch_tensor = torch.FloatTensor(np.array(encodings)).to(device)
+    batch_mask = torch.zeros(len(encodings), ACTION_SPACE_SIZE, device=device)
+    # Set legal mask only for the current state (index 0)
+    for action in legal_actions:
+        batch_mask[0][game.action_to_index(action)] = 1.0
+
+    policies, values = network.predict_batch(batch_tensor, batch_mask)
+    policy_np = policies[0].cpu().numpy()
+    values_np = values.cpu().numpy()
+
+    win_prob = (float(values_np[0]) + 1.0) / 2.0
+
+    move_evals = []
+    for i, action in enumerate(legal_actions):
         idx = game.action_to_index(action)
         src, die = action
-
-        # Evaluate resulting state for equity
-        new_state = game.apply_action(s, action)
-        new_enc = torch.FloatTensor(game.encode_state(new_state)).to(device)
-        new_mask = torch.zeros(ACTION_SPACE_SIZE, device=device)
-        _, move_value = network.predict(new_enc, new_mask)
-
-        # Negate if player changed (opponent's value)
-        if new_state.current_player != s.current_player:
+        move_value = float(values_np[i + 1])
+        if result_states[i].current_player != s.current_player:
             move_value = -move_value
 
         move_evals.append({
-            "source": src,
-            "die": die,
+            "source": int(src),
+            "die": int(die),
             "policy_weight": float(policy_np[idx]),
             "equity": float((move_value + 1.0) / 2.0),
             "source_label": "BAR" if src == BAR else f"Point {src + 1}",
         })
 
-    # Sort by equity (best first)
     move_evals.sort(key=lambda m: m["equity"], reverse=True)
 
     return {
@@ -123,7 +148,10 @@ def _get_ai_analysis(s: BackgammonState) -> dict:
 def _detect_blunder(
     s: BackgammonState, chosen_action: tuple[int, int]
 ) -> Optional[dict]:
-    """Check if the chosen move is a blunder compared to the best move."""
+    """Check if the chosen move is a blunder compared to the best move.
+
+    Uses batched network evaluation for all legal moves.
+    """
     if network is None:
         return None
 
@@ -133,17 +161,26 @@ def _detect_blunder(
 
     network.eval()
 
-    # Evaluate all legal moves
+    # Batch evaluate all resulting states
+    encodings = []
+    result_states = []
+    for action in legal_actions:
+        new_state = game.apply_action(s, action)
+        encodings.append(game.encode_state(new_state))
+        result_states.append(new_state)
+
+    batch_tensor = torch.FloatTensor(np.array(encodings)).to(device)
+    batch_mask = torch.zeros(len(encodings), ACTION_SPACE_SIZE, device=device)
+    _, values = network.predict_batch(batch_tensor, batch_mask)
+    values_np = values.cpu().numpy()
+
     best_equity = -float("inf")
     best_action = None
     chosen_equity = None
 
-    for action in legal_actions:
-        new_state = game.apply_action(s, action)
-        enc = torch.FloatTensor(game.encode_state(new_state)).to(device)
-        mask = torch.zeros(ACTION_SPACE_SIZE, device=device)
-        _, val = network.predict(enc, mask)
-        if new_state.current_player != s.current_player:
+    for i, action in enumerate(legal_actions):
+        val = float(values_np[i])
+        if result_states[i].current_player != s.current_player:
             val = -val
         equity = (val + 1.0) / 2.0
 
@@ -162,8 +199,8 @@ def _detect_blunder(
             "is_blunder": True,
             "equity_drop": float(equity_drop),
             "best_move": {
-                "source": best_action[0],
-                "die": best_action[1],
+                "source": int(best_action[0]),
+                "die": int(best_action[1]),
                 "source_label": "BAR" if best_action[0] == BAR else f"Point {best_action[0] + 1}",
             },
             "best_equity": float(best_equity),

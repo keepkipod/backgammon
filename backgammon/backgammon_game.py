@@ -190,18 +190,16 @@ def _get_sub_moves_for_die(state: BackgammonState, player: int, die: int) -> lis
             # Bearing off
             if not _can_bear_off(state, player):
                 continue
-            # Can bear off exactly, or if this is the farthest checker and die is larger
+            # Exact bear off: die matches the point exactly (src - die == -1 for p0, src + die == 24 for p1)
+            # Overshoot: die is larger than needed — only allowed from the farthest occupied point
             farthest = _farthest_checker(state, player)
             if player == 0:
-                if src == farthest or src - die >= 0:
-                    # src - die >= 0 means exact bear off; src == farthest allows larger die
-                    if src - die < 0 and src != farthest:
-                        continue
+                is_exact = (src - die == -1)
+                if is_exact or src == farthest:
                     moves.append((src, die))
             else:
-                if src == farthest or src + die <= 23:
-                    if src + die > 23 and src != farthest:
-                        continue
+                is_exact = (src + die == NUM_POINTS)
+                if is_exact or src == farthest:
                     moves.append((src, die))
         else:
             # Regular move — destination must not be blocked
